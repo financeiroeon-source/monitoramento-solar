@@ -1,166 +1,108 @@
 import streamlit as st
 import requests
 import pandas as pd
-import time
 
 # --- CONFIGURAÇÕES ---
-# Servidor da América Latina (Padrão Brasil)
 BASE_URL = "https://la5.fusionsolar.huawei.com/thirdData"
 
 st.set_page_config(page_title="Monitoramento Huawei", page_icon="☀️", layout="wide")
 
-st.title("☀️ Portal de Monitoramento - Teste Huawei")
-st.markdown("Este painel verifica quais clientes estão **OFFLINE** ou com **FALHA**.")
+st.title("☀️ Portal de Monitoramento - Eon Solar")
 
-# --- BARRA LATERAL (LOGIN) ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.header("🔐 Acesso API")
-    st.info("Use o usuário e senha criados no menu 'Northbound Management' da Huawei.")
-    api_user = st.text_input("Usuário da API", value="")
-    api_pass = st.text_input("Senha da API", type="password", value="")
-    
+    api_user = st.text_input("Usuário (Northbound)", value="")
+    api_pass = st.text_input("Senha", type="password", value="")
     btn_carregar = st.button("🔍 Buscar Dados")
 
-# --- FUNÇÕES DO SISTEMA ---
+# --- FUNÇÕES ---
 def login_huawei(user, password):
-    """Faz login e retorna o Token de acesso"""
-    url = f"{BASE_URL}/login"
-    payload = {"userName": user, "systemCode": password}
-    
     try:
-        r = requests.post(url, json=payload, timeout=15)
+        r = requests.post(f"{BASE_URL}/login", json={"userName": user, "systemCode": password}, timeout=15)
         r.raise_for_status()
-        data = r.json()
-        
-        if data.get("success", False):
-            return r.headers.get("xsrf-token")
-        else:
-            st.error(f"Erro no login: {data.get('failCode')} - {data.get('message')}")
-            return None
+        if r.json().get("success", False): return r.headers.get("xsrf-token")
     except Exception as e:
-        st.error(f"Erro de conexão ao tentar logar: {e}")
-        return None
+        st.error(f"Erro Login: {e}")
+    return None
 
-def get_station_list(token):
-    """Pega a lista de todas as usinas"""
-    url = f"{BASE_URL}/getStationList"
-    headers = {"xsrf-token": token}
-    # Pega as primeiras 100 usinas
-    payload = {"pageNo": 1, "pageSize": 100}
-    
+def get_data(url, token, payload):
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        r = requests.post(url, json=payload, headers={"xsrf-token": token}, timeout=15)
         return r.json()
-    except Exception as e:
-        st.error(f"Erro ao baixar lista de usinas: {e}")
+    except:
         return {}
 
-def get_real_time_kpi(token, station_codes):
-    """Pega dados em tempo real (status) das usinas"""
-    url = f"{BASE_URL}/getStationRealKpi"
-    headers = {"xsrf-token": token}
-    payload = {"stationCodes": station_codes}
-    
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=15)
-        return r.json()
-    except Exception as e:
-        st.error(f"Erro ao baixar dados de tempo real: {e}")
-        return {}
-
-# --- LÓGICA PRINCIPAL ---
+# --- LÓGICA ---
 if btn_carregar:
     if not api_user or not api_pass:
-        st.warning("⚠️ Preencha usuário e senha na barra lateral antes de buscar.")
+        st.warning("Preencha usuário e senha.")
     else:
-        with st.spinner("Conectando aos servidores da Huawei..."):
-            # 1. TENTAR LOGIN
+        with st.spinner("Conectando..."):
             token = login_huawei(api_user, api_pass)
-            
             if token:
-                st.toast("Login realizado! Baixando usinas...", icon="✅")
-                
-                # 2. PEGAR LISTA DE USINAS
-                data_stations = get_station_list(token)
-                
-                # Verificação robusta se a lista veio
-                stations = []
-                raw_stations = data_stations.get("data")
-                
-                if isinstance(raw_stations, list):
-                    stations = raw_stations
-                elif isinstance(raw_stations, dict) and "list" in raw_stations:
-                    stations = raw_stations["list"]
-                
+                # 1. Pegar Lista
+                raw_stations = get_data(f"{BASE_URL}/getStationList", token, {"pageNo": 1, "pageSize": 100})
+                stations = raw_stations.get("data", {}).get("list", []) if raw_stations.get("data") else []
+
                 if stations:
-                    # Extrair códigos das estações
-                    station_codes = ",".join([str(s.get("stationCode")) for s in stations])
+                    codes = ",".join([str(s["stationCode"]) for s in stations])
                     
-                    # 3. PEGAR STATUS EM TEMPO REAL
-                    data_kpi = get_real_time_kpi(token, station_codes)
-                    
-                    # --- CORREÇÃO DO ERRO ANTERIOR ---
-                    # O sistema agora verifica se veio como lista direta ou dicionário
-                    lista_dados = []
-                    raw_kpi = data_kpi.get("data")
-                    
-                    if isinstance(raw_kpi, list):
-                        lista_dados = raw_kpi
-                    elif isinstance(raw_kpi, dict) and "list" in raw_kpi:
-                        lista_dados = raw_kpi["list"]
-                    
-                    if lista_dados:
-                        lista_final = []
-                        
-                        # Mapeamento de Status Huawei: 1=Normal, 2=Falha, 3=Desconectado
-                        map_status = {1: "Normal", 2: "FALHA", 3: "OFFLINE"}
-                        
-                        for kpi in lista_dados:
-                            s_code = kpi.get("stationCode")
-                            
-                            # Tenta achar o nome da usina na lista anterior
-                            usina_info = next((s for s in stations if str(s.get("stationCode")) == str(s_code)), {})
-                            nome = usina_info.get("stationName", f"Usina {s_code}")
-                            endereco = usina_info.get("stationAddr", "-")
-                            
-                            status_code = kpi.get("realHealthState", 3)
-                            status_text = map_status.get(status_code, "Desconhecido")
-                            
-                            lista_final.append({
-                                "Cliente": nome,
-                                "Status": status_text,
-                                "Potência (kW)": kpi.get("day_power", 0),
-                                "Endereço": endereco
-                            })
-                        
-                        # Criar Tabela (DataFrame)
-                        df = pd.DataFrame(lista_final)
-                        
-                        # Separar problemas
-                        df_problema = df[df["Status"].isin(["OFFLINE", "FALHA"])]
-                        df_ok = df[df["Status"] == "Normal"]
-                        
-                        # --- EXIBIÇÃO ---
-                        kpi1, kpi2, kpi3 = st.columns(3)
-                        kpi1.metric("Total Monitorado", len(df))
-                        kpi2.metric("Com Alerta", len(df_problema), delta_color="inverse")
-                        kpi3.metric("Normal", len(df_ok))
-                        
-                        st.divider()
-                        
-                        st.subheader("🚨 Atenção Necessária")
-                        if not df_problema.empty:
-                            st.error(f"Encontramos {len(df_problema)} clientes com problemas.")
-                            st.dataframe(df_problema, use_container_width=True, hide_index=True)
+                    # 2. Pegar Status (KPI)
+                    raw_kpi = get_data(f"{BASE_URL}/getStationRealKpi", token, {"stationCodes": codes})
+                    kpi_list = raw_kpi.get("data", {}).get("list", []) if raw_kpi.get("data") else []
+
+                    # --- ÁREA DE DEBUG (NOVO) ---
+                    with st.expander("🛠️ CLIQUE AQUI SE TODOS ESTIVEREM OFFLINE (Ver Dados Brutos)"):
+                        st.write("Estrutura do primeiro cliente recebida da Huawei:")
+                        if kpi_list:
+                            st.json(kpi_list[0])
                         else:
-                            st.success("Tudo limpo! Nenhum cliente offline ou com falha.")
-                            
-                        with st.expander("Ver lista de clientes operando normalmente"):
-                            st.dataframe(df_ok, use_container_width=True, hide_index=True)
-                            
+                            st.write("Nenhum dado de KPI recebido.")
+
+                    lista_final = []
+                    # Mapeamento Status: 1=Conectado, 2=Falha, 3=Offline
+                    map_status = {1: "🟢 ONLINE", 2: "🔴 FALHA", 3: "⚫ OFFLINE"}
+
+                    for item in kpi_list:
+                        # Tenta achar os dados na raiz ou dentro de 'dataItemMap'
+                        dados = item.get("dataItemMap", item)
+                        
+                        s_code = item.get("stationCode")
+                        usina = next((s for s in stations if str(s["stationCode"]) == str(s_code)), {})
+                        
+                        # Tenta ler o status com diferentes nomes de chave possíveis
+                        state = dados.get("realHealthState") or dados.get("real_health_state") or 3
+                        power = dados.get("day_power") or dados.get("dayPower") or 0
+                        
+                        lista_final.append({
+                            "Cliente": usina.get("stationName", f"ID {s_code}"),
+                            "Status": map_status.get(state, "DESCONHECIDO"),
+                            "Potência (kW)": power,
+                            "Endereço": usina.get("stationAddr", "-")
+                        })
+
+                    df = pd.DataFrame(lista_final)
+                    
+                    # Filtros
+                    df_offline = df[df["Status"].str.contains("OFFLINE|FALHA")]
+                    df_online = df[df["Status"].str.contains("ONLINE")]
+
+                    # Métricas
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total", len(df))
+                    c2.metric("Com Problema", len(df_offline))
+                    c3.metric("Operando", len(df_online))
+
+                    st.divider()
+                    if not df_offline.empty:
+                        st.error("⚠️ Clientes com Alerta")
+                        st.dataframe(df_offline, use_container_width=True, hide_index=True)
                     else:
-                        st.warning("A lista de usinas foi baixada, mas os dados de tempo real (KPI) vieram vazios.")
-                        st.write("Resposta crua da Huawei (KPI):", data_kpi)
+                        st.success("Tudo certo! Ninguém offline.")
+                        
+                    st.subheader("Clientes Normais")
+                    st.dataframe(df_online, use_container_width=True, hide_index=True)
+
                 else:
-                    st.warning("Não encontramos usinas vinculadas a essa conta de instalador.")
-                    st.write("Resposta crua da Huawei (StationList):", data_stations)
+                    st.warning("Lista de usinas veio vazia.")
