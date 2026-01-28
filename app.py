@@ -8,7 +8,7 @@ import base64
 from datetime import datetime, timezone
 
 # --- CREDENCIAIS ---
-# ATENÇÃO: Contém senhas reais. Não compartilhe este arquivo.
+# ATENÇÃO: Contém senhas reais. Não compartilhe este link publicamente.
 CREDS = {
     "huawei": {
         "user": "Eon.solar",
@@ -103,6 +103,86 @@ def get_solis_data():
         content_md5 = base64.b64encode(hashlib.md5(body.encode('utf-8')).digest()).decode('utf-8')
         
         sign_str = f"POST\n{content_md5}\napplication/json\n{now}\n{resource}"
-        signature = hmac.new(
-            CREDS['solis']['key_secret'].encode('utf-8'),
-            sign_str.encode('utf-8'),
+        
+        # Simplifiquei a assinatura para evitar erro de quebra de linha
+        key = CREDS['solis']['key_secret'].encode('utf-8')
+        msg = sign_str.encode('utf-8')
+        signature = hmac.new(key, msg, hashlib.sha1).digest()
+        
+        auth_sign = base64.b64encode(signature).decode('utf-8')
+        auth = f"API {CREDS['solis']['key_id']}:{auth_sign}"
+        
+        headers = {
+            "Authorization": auth,
+            "Content-MD5": content_md5,
+            "Content-Type": "application/json",
+            "Date": now
+        }
+        
+        r = requests.post(f"{CREDS['solis']['url']}{resource}", data=body, headers=headers, timeout=15)
+        
+        if r.status_code != 200:
+            return []
+            
+        data = r.json()
+        stations = data.get("data", {}).get("page", {}).get("records", [])
+        
+        results = []
+        for s in stations:
+            # Solis: 1=Generating, 2=Offline, 3=Fault
+            state = s.get("state", 2)
+            power = float(s.get("dayEnergy", 0))
+            
+            # Regra de Ouro Solis
+            status = "⚫ OFFLINE"
+            if state == 1 or power > 0.05:
+                status = "🟢 ONLINE"
+            elif state == 3:
+                status = "🔴 FALHA"
+                
+            results.append({
+                "Marca": "Solis",
+                "Cliente": s.get("stationName", "Desconhecido"),
+                "Status": status,
+                "Produção (kWh)": power,
+                "Endereço": f"{s.get('city', '')}/{s.get('state', '')}"
+            })
+        return results
+
+    except Exception as e:
+        st.error(f"Erro Solis: {e}")
+        return []
+
+# --- BOTÃO PRINCIPAL ---
+if st.button("🔄 Atualizar Tudo (Huawei + Solis)", type="primary"):
+    with st.spinner("Buscando dados nas nuvens..."):
+        dados_huawei = get_huawei_data()
+        dados_solis = get_solis_data()
+        
+        todos = dados_huawei + dados_solis
+        
+        if todos:
+            df = pd.DataFrame(todos)
+            
+            # Separar problemas
+            df_problema = df[df["Status"].str.contains("OFFLINE|FALHA|DESCONHECIDO")]
+            df_ok = df[~df["Status"].str.contains("OFFLINE|FALHA|DESCONHECIDO")]
+            
+            # Métricas do Topo
+            kpi1, kpi2, kpi3 = st.columns(3)
+            kpi1.metric("Total Monitorado", len(df))
+            kpi2.metric("Com Alerta", len(df_problema), delta_color="inverse")
+            kpi3.metric("Energia Gerada Hoje", f"{df['Produção (kWh)'].sum():.1f} kWh")
+            
+            st.divider()
+            
+            if not df_problema.empty:
+                st.error(f"🚨 Atenção: {len(df_problema)} clientes precisam ser verificados")
+                st.dataframe(df_problema, use_container_width=True, hide_index=True)
+            else:
+                st.success("Tudo 100%! Nenhum cliente offline.")
+            
+            with st.expander("Ver clientes operando normalmente"):
+                st.dataframe(df_ok, use_container_width=True, hide_index=True)
+        else:
+            st.warning("Não foi possível obter dados de nenhuma das plataformas. Verifique se as credenciais estão corretas.")
